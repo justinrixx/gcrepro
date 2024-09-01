@@ -1,13 +1,16 @@
-an attempt to reproduce a distributed lockup in groupcache. essentially, if peer lists disagree between peers, it's possible for peer a to belive peer b is the owner of an asset, while peer b believes peer a is the owner. they will wait on each other indefinitely. peer lists will disagree for a moment, however short, during rolling deployments, when a node is removed or added, etc.
+1. run the test case in `crosstalk_test.go`.
+1. note that it passes.
+1. comment out the assignment of `pool.Transport` in the `groupcache.HTTPPoolOptions`.
+1. note that it fails.
 
-1. `go run main.go --port=8080 --peers=http://localhost:8081,http://localhost:8081,http://localhost:8082`
-1. `go run main.go --port=8081 --peers=http://localhost:8081,http://localhost:8082`
-1. `go run main.go --port=8082 --peers=http://localhost:8081,http://localhost:8081`
-1. `curl localhost:8080/things/foobar` (note that this hangs indefinitely)
-1. repeat curl in new terminal (leaving old one running) and note it still hangs indefinitely
-1. cancel first curl
-1. note that the second curl automatically cancels
-1. get the curl stuck again
-1. fix node 1's peer list: `curl -d 'http://localhost:8080,http://localhost:8081,http://localhost:8082' localhost:8080/peers`
-1. notice curl is still stuck; cancel again
-1. curl once more, notice it returns now
+this shows that when groupcache instances with out-of-sync peer lists may propagate requests to each other and wait on each other to fulfill the requests. all requests for an object "stuck" in this way will hang until the original context times out.
+
+instead, the library should behave such that when handling a request on the groupcache handler, no further peers should be consulted to prevent a lockup. in this example, the roundtripper returns an error which `groupcache` handles gracefully:
+
+- the request comes in and `group.Get()` is called ([code](https://github.com/mailgun/groupcache/blob/9f417fbc4f99eb58e51f8be01b1ac627a83a348f/http.go#L227))
+- `Get()` attempts to find the object locally. if not found, it'll load it from the group ([code](https://github.com/mailgun/groupcache/blob/9f417fbc4f99eb58e51f8be01b1ac627a83a348f/groupcache.go#L257))
+- `load()` attempts to get the object from a peer ([code](https://github.com/mailgun/groupcache/blob/9f417fbc4f99eb58e51f8be01b1ac627a83a348f/groupcache.go#L382))
+- the crosstalk transport defined in this project returns a new error in the roundtripper; no actual http request is made to the peer
+- the error [is none of these](https://github.com/mailgun/groupcache/blob/9f417fbc4f99eb58e51f8be01b1ac627a83a348f/groupcache.go#L397-L423) so the execution continues and the node [just gets the value itself](https://github.com/mailgun/groupcache/blob/9f417fbc4f99eb58e51f8be01b1ac627a83a348f/groupcache.go#L426).
+
+a similar fix can be applied to other forks of `groupcache`, as well as the original.
